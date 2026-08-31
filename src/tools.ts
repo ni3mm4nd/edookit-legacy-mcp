@@ -342,44 +342,54 @@ export async function getTimetable(args: { view?: "current" | "static" | "upcomi
   const $ = parseHtml(html);
 
   const heading = $("h2, h1").first().text().trim();
-  const weekLabel = $(".week-label, .pagination li:nth-child(2)").text().trim();
+
+  // Detect the selected term label from the HTML
+  const termLabel = $("#selected-term").text().trim() ||
+    $("a.selected[href*='termSelector']").text().trim();
 
   const events: Array<{
     day?: string;
     time?: string;
     subject?: string;
-    teacher?: string;
-    room?: string;
-    status?: string;
-    url?: string;
+    code?: string;
+    cancelled?: boolean;
   }> = [];
 
-  // Parse lesson blocks
-  $("a[href*='/timetable/detail'], a[href*='event=']").each((_, el) => {
+  // Primary parser: .lesson-entry and .lessonRow contain "Day date, HH:MM Subject (CODE)"
+  // e.g. "Út 1. 9. 2026, 8:30 Svět češtiny (CZE - 1.Q)"
+  $(".lesson-entry, .lessonRow").each((_, el) => {
     const $el = $(el);
-    const text = $el.text().trim().replace(/\s+/g, " ");
-    const url = $el.attr("href");
-    const $parent = $el.closest("[class*='block'], td, [class*='cell']");
-    const status = $el.find("[class*='status']").text().trim() ||
-      ($el.text().includes("Zrušeno") ? "cancelled" : "");
-    if (text) events.push({ subject: text, url, status });
-  });
+    const raw = $el.text().replace(/\s+/g, " ").trim();
+    if (!raw) return;
 
-  // Named lesson slots
-  $("[class*='block'], [class*='lesson']").each((_, el) => {
-    const $el = $(el);
-    const title = $el.attr("title") || $el.text().trim().replace(/\s+/g, " ");
-    if (title && !title.includes("block") && title.length < 100) {
-      const parts = title.split(/\s+/);
+    // Check if cancelled
+    const cancelled = $el.hasClass("cancelled") ||
+      raw.includes("Zrušeno") ||
+      $el.find("[class*='cancel'], [class*='zrusen']").length > 0;
+
+    // Try to extract "Day Date, Time Subject (CODE)" pattern
+    // e.g. "Út 1. 9. 2026, 8:30 Svět češtiny (CZE - 1.Q)"
+    const m = raw.match(/^([\wÚúČčŠšŽžÝýÁáÉéÍíÓóů]+\s+[\d.\s]+\d{4}),?\s+(\d+:\d+)\s+(.+?)(?:\s*\(([^)]+)\))?$/);
+    if (m) {
       events.push({
-        subject: parts[0],
-        teacher: parts.slice(1, -1).join(" "),
-        room: parts[parts.length - 1],
+        day: m[1].trim(),
+        time: m[2],
+        subject: m[3].trim(),
+        code: m[4]?.trim(),
+        cancelled,
       });
+      return;
+    }
+
+    // Fallback: just grab the time from .date_time and the remaining text
+    const time = $el.find(".date_time").text().trim();
+    const subject = raw.replace(time, "").replace(/Zrušeno/g, "").trim();
+    if (subject || time) {
+      events.push({ time, subject: subject || raw, cancelled });
     }
   });
 
-  return { heading, weekLabel, path, events: events.slice(0, 100) };
+  return { heading, term: termLabel, path, events: events.slice(0, 100) };
 }
 
 export async function getAttendance(args: { view?: "excuse" | "report" | "report-lesson" | "excused" | "stats" | "overview" }) {
