@@ -55,12 +55,18 @@ async function getContext(cfg: ClientConfig): Promise<BrowserContext> {
     process.stderr.write("[edookit-portal] Found existing cookies, verifying session...\n");
     const testPage = await ctx.newPage();
     try {
-      const resp = await testPage.goto(`${baseUrl}/overview/updates`, {
+      await testPage.goto(`${baseUrl}/overview/updates`, {
         waitUntil: "domcontentloaded",
         timeout: 15_000,
       });
+      // Wait for any OIDC redirects to settle
+      await testPage.waitForFunction(
+        (lp: string) => !window.location.href.includes(lp),
+        "/user/login",
+        { timeout: 5_000 }
+      ).catch(() => {});
       const finalUrl = testPage.url();
-      if (!finalUrl.includes("/user/login") && !finalUrl.includes("user/oidc")) {
+      if (!finalUrl.includes("/user/login")) {
         process.stderr.write("[edookit-portal] Existing session is valid.\n");
         await testPage.close();
         _ctx = ctx;
@@ -174,13 +180,14 @@ async function loginWithContext(ctx: BrowserContext, cfg: ClientConfig): Promise
         process.stderr.write("[edookit-portal] Auth cookies found, confirming session...\n");
         try {
           await page.goto(`${baseUrl}/overview/updates`, { waitUntil: "domcontentloaded", timeout: 15_000 });
-          await page.waitForTimeout(1_000); // let any redirect settle
+          // Wait for OIDC redirects to fully settle
+          await page.waitForFunction(
+            (loginPath: string) => !window.location.href.includes(loginPath),
+            "/user/login",
+            { timeout: 8_000 }
+          ).catch(() => { /* best-effort — if still on login, portalFetch will re-auth */ });
         } catch {
           // best-effort
-        }
-        const finalUrl = page.url();
-        if (finalUrl.includes("/user/login")) {
-          throw new Error("Session verification failed after login — portal redirected to login page.");
         }
         process.stderr.write("[edookit-portal] Authentication successful.\n");
         await page.close();
@@ -228,39 +235,54 @@ export async function portalFetch(
     contentType = "application/json";
   }
 
-  const doRequest = async (targetUrl: string): Promise<{ status: number; headers: Record<string, string>; body: string; finalUrl: string }> => {
-    const response = await ctx.request.fetch(targetUrl, {
-      method,
-      headers: {
-        "Accept": "text/html,application/xhtml+xml,*/*",
-        "Accept-Language": "cs,en;q=0.9",
-        ...(contentType ? { "Content-Type": contentType } : {}),
-        ...extraHeaders,
-      },
-      ...(bodyStr ? { data: bodyStr } : {}),
-      maxRedirects: 5,
-      failOnStatusCode: false,
-    });
+  const makeRequest = (context: BrowserContext) =>
+    async (targetUrl: string): Promise<{ status: number; headers: Record<string, string>; body: string; finalUrl: string }> => {
+      // ctx.request is an isolated APIRequestContext that doesn't share cookies
+      // with the browser's own cookie jar. Use a page navigation instead so the
+      // same cookie store that authenticated is used for all requests.
+      const page = await context.newPage();
+      try {
+        if (method !== "GET" && method !== "get" && bodyStr) {
+          // POST: use page.evaluate to submit a fetch from within the browser
+          await page.goto("about:blank");
+          const result = await page.evaluate(
+            async ({ url, method: m, body: b, headers: h }) => {
+              const resp = await fetch(url, {
+                method: m,
+                headers: h,
+                body: b,
+                redirect: "follow",
+                credentials: "include",
+              });
+              return {
+                status: resp.status,
+                finalUrl: resp.url,
+                body: await resp.text(),
+              };
+            },
+            { url: targetUrl, method, body: bodyStr, headers: { "Accept": "text/html,application/xhtml+xml,*/*", "Accept-Language": "cs,en;q=0.9", ...(contentType ? { "Content-Type": contentType } : {}), ...extraHeaders } }
+          );
+          return { status: result.status, headers: {}, body: result.body, finalUrl: result.finalUrl };
+        }
 
-    const resHeaders: Record<string, string> = {};
-    for (const [k, v] of Object.entries(response.headers())) {
-      resHeaders[k.toLowerCase()] = v;
-    }
+        // GET: standard page navigation
+        const response = await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 20_000 });
+        const finalUrl = page.url();
+        const bodyText = await page.content();
+        const status = response?.status() ?? 200;
+        const resHeaders: Record<string, string> = {};
+        for (const [k, v] of Object.entries(response?.headers() ?? {})) {
+          resHeaders[k.toLowerCase()] = v;
+        }
+        return { status, headers: resHeaders, body: bodyText, finalUrl };
+      } finally {
+        try { await page.close(); } catch { /* ignore */ }
+      }
+    };
 
-    const bodyText = await response.text();
-    const finalUrl = response.url();
+  let result = await makeRequest(ctx)(url);
 
-    // If redirected to login, session expired — re-authenticate
-    if (finalUrl.includes("/user/login") || finalUrl.includes("user/oidc")) {
-      return { status: response.status(), headers: resHeaders, body: bodyText, finalUrl };
-    }
-
-    return { status: response.status(), headers: resHeaders, body: bodyText, finalUrl };
-  };
-
-  let result = await doRequest(url);
-
-  if (result.finalUrl.includes("/user/login") || result.finalUrl.includes("user/oidc")) {
+  if (result.finalUrl.includes("/user/login")) {
     process.stderr.write("[edookit-portal] Session expired, re-authenticating...\n");
     // Wipe context and re-login
     try { await _ctx?.close(); } catch { /* ignore */ }
@@ -269,7 +291,7 @@ export async function portalFetch(
     fs.rmSync(profileDir(cfg.school), { recursive: true, force: true });
 
     const freshCtx = await getContext(cfg);
-    const freshResult = await doRequest(url);
+    const freshResult = await makeRequest(freshCtx)(url);
     if (freshResult.finalUrl.includes("/user/login")) {
       throw new Error("Authentication failed. Check EDOOKIT_USERNAME and EDOOKIT_PASSWORD.");
     }

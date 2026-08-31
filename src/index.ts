@@ -14,6 +14,7 @@ import {
   getExams,
   getMaterials,
   getLessonPlans,
+  getTerms,
   getTimetable,
   getAttendance,
   excuseAbsence,
@@ -113,8 +114,13 @@ const TOOLS = [
     },
   },
   {
+    name: "portal_terms",
+    description: "List available school terms/years (e.g. 2026/27, 2025/26). Use this to find the term label before calling portal_timetable with a specific term.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
     name: "portal_timetable",
-    description: "Get the student timetable. Views: current week, static (permanent), upcoming events, archive.",
+    description: "Get the student timetable. Views: current week, static (permanent), upcoming events, archive. Use the 'term' parameter to select a specific school year (e.g. '2026/27'). Call portal_terms first to see available terms.",
     inputSchema: {
       type: "object",
       properties: {
@@ -126,6 +132,10 @@ const TOOLS = [
         offset: {
           type: "number",
           description: "Week offset in days (e.g. 7 = next week, -7 = last week). Only for 'current' view.",
+        },
+        term: {
+          type: "string",
+          description: "School year to view, e.g. '2026/27' or '2025/26'. If omitted, uses the currently active term. Call portal_terms to list options.",
         },
       },
     },
@@ -297,6 +307,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       case "portal_exams":            result = await getExams(args as any); break;
       case "portal_materials":        result = await getMaterials(args as any); break;
       case "portal_lesson_plans":     result = await getLessonPlans(args as any); break;
+      case "portal_terms":            result = await getTerms(); break;
       case "portal_timetable":        result = await getTimetable(args as any); break;
       case "portal_attendance":       result = await getAttendance(args as any); break;
       case "portal_excuse_absence":   result = await excuseAbsence(args as any); break;

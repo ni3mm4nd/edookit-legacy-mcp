@@ -276,13 +276,64 @@ export async function getLessonPlans(args: { week?: string }) {
   return { path: makePath(args.week), lessons };
 }
 
-export async function getTimetable(args: { view?: "current" | "static" | "upcoming" | "archive"; offset?: number }) {
+export async function getTerms() {
+  const html = await getPage("/timetable/");
+  const $ = parseHtml(html);
+
+  const terms: Array<{ id: string; label: string; selected: boolean }> = [];
+  $("a[href*=\"termSelector-new\"]").each((_, el) => {
+    const href = $(el).attr("href") || "";
+    const m = href.match(/termSelector-new=(\d+)/);
+    if (m) {
+      terms.push({
+        id: m[1],
+        label: $(el).text().trim(),
+        selected: $(el).attr("class") === "selected",
+      });
+    }
+  });
+
+  return { terms };
+}
+
+export async function getTimetable(args: { view?: "current" | "static" | "upcoming" | "archive"; offset?: number; term?: string }) {
   const viewMap: Record<string, string> = {
     static: "/timetable/static",
     upcoming: "/timetable/upcoming",
     archive: "/timetable/archive",
   };
-  let path = viewMap[args.view || ""] || "/timetable/";
+  let basePath = viewMap[args.view || ""] || "/timetable/";
+
+  // If a term is requested, switch to it first by fetching the term-selector URL.
+  // The portal sets a server-side session variable for the active term.
+  if (args.term) {
+    // First get the term list to resolve label → ID
+    const termsHtml = await getPage("/timetable/");
+    const $t = parseHtml(termsHtml);
+    let termId: string | null = null;
+
+    $t("a[href*=\"termSelector-new\"]").each((_, el) => {
+      const href = $t(el).attr("href") || "";
+      const m = href.match(/termSelector-new=(\d+)/);
+      if (!m) return;
+      const label = $t(el).text().trim();
+      const id = m[1];
+      // Match by ID directly or by year label (e.g. "2026/27" or "2026/2027")
+      const normalise = (s: string) => s.replace(/\s/g, "").replace(/\/(\d{2})$/, (_, y) => `/${y}`);
+      if (id === args.term || normalise(label) === normalise(args.term!)) {
+        termId = id;
+      }
+    });
+
+    if (!termId) {
+      throw new Error(`Term "${args.term}" not found. Use getTerms to list available terms.`);
+    }
+
+    // Activate the term (portal sets session variable)
+    await getPage(`/timetable/?mainMenu-termSelector-new=${termId}&do=mainMenu-termSelector-change`);
+  }
+
+  let path = basePath;
   if (args.offset && args.view !== "static") {
     path += `?familyTimetable-value=${args.offset}&do=familyTimetable-changeFilter`;
   }
