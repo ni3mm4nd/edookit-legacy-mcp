@@ -1,4 +1,4 @@
-import { portalFetch, parseHtml, type ClientConfig } from "./client.js";
+import { portalFetch, portalAjax, parseHtml, type ClientConfig } from "./client.js";
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -329,8 +329,8 @@ export async function getTimetable(args: { view?: "current" | "static" | "upcomi
       throw new Error(`Term "${args.term}" not found. Use getTerms to list available terms.`);
     }
 
-    // Activate the term (portal sets session variable)
-    await getPage(`/timetable/?mainMenu-termSelector-new=${termId}&do=mainMenu-termSelector-change`);
+    // Activate the term via AJAX with CSRF token (Nette requires X-CSRF-Token + X-Requested-With)
+    await portalAjax(cfg(), `/timetable/?mainMenu-termSelector-new=${termId}&do=mainMenu-termSelector-change`);
   }
 
   let path = basePath;

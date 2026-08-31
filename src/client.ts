@@ -3,6 +3,7 @@ import * as os from "os";
 import * as path from "path";
 import { load as cheerioLoad } from "cheerio";
 import type { BrowserContext } from "playwright";
+import { chromium } from "playwright";
 
 export interface ClientConfig {
   school: string;
@@ -34,7 +35,6 @@ async function getContext(cfg: ClientConfig): Promise<BrowserContext> {
     _ctx = null;
   }
 
-  const { chromium } = await import("playwright");
   const dir = profileDir(cfg.school);
   const headless = !!(cfg.username && cfg.password);
 
@@ -54,37 +54,45 @@ async function getContext(cfg: ClientConfig): Promise<BrowserContext> {
     // Verify the session is actually usable
     process.stderr.write("[edookit-portal] Found existing cookies, verifying session...\n");
     const testPage = await ctx.newPage();
+    let sessionValid = false;
     try {
       await testPage.goto(`${baseUrl}/overview/updates`, {
         waitUntil: "domcontentloaded",
         timeout: 15_000,
       });
-      // Wait for any OIDC redirects to settle
+      // Wait generously for OIDC redirects to settle (up to 8s)
       await testPage.waitForFunction(
         (lp: string) => !window.location.href.includes(lp),
         "/user/login",
-        { timeout: 5_000 }
+        { timeout: 8_000 }
       ).catch(() => {});
       const finalUrl = testPage.url();
-      if (!finalUrl.includes("/user/login")) {
-        process.stderr.write("[edookit-portal] Existing session is valid.\n");
-        await testPage.close();
-        _ctx = ctx;
-        _ctxSchool = cfg.school;
-        return ctx;
-      }
+      sessionValid = !finalUrl.includes("/user/login");
     } catch {
-      // ignore, fall through to login
+      // ignore, treat as expired
     } finally {
       try { await testPage.close(); } catch { /* ignore */ }
     }
+
+    if (sessionValid) {
+      process.stderr.write("[edookit-portal] Existing session is valid.\n");
+      _ctx = ctx;
+      _ctxSchool = cfg.school;
+      return ctx;
+    }
+
     process.stderr.write("[edookit-portal] Existing session expired, re-logging in...\n");
     // Clear cookies and wipe profile for fresh login
     await ctx.clearCookies();
     await ctx.close();
     fs.rmSync(dir, { recursive: true, force: true });
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    return getContext(cfg); // recurse once
+    // Create a fresh context and log in directly (no verification check on brand-new session)
+    const freshCtx = await chromium.launchPersistentContext(dir, { headless, args: ["--no-sandbox"] });
+    await loginWithContext(freshCtx, cfg);
+    _ctx = freshCtx;
+    _ctxSchool = cfg.school;
+    return freshCtx;
   }
 
   // No existing session — log in
@@ -209,6 +217,47 @@ async function loginWithContext(ctx: BrowserContext, cfg: ClientConfig): Promise
 
 // ── HTTP client (via Playwright browser context) ──────────────────────────────
 
+/**
+ * Send an AJAX request from within the authenticated browser page.
+ * Automatically reads the uu.app.csrf cookie and sends it as X-CSRF-Token.
+ * Returns the response body as a string.
+ */
+export async function portalAjax(
+  cfg: ClientConfig,
+  urlPath: string,
+): Promise<string> {
+  const ctx = await getContext(cfg);
+  const baseUrl = `https://${cfg.school}.edookit.net`;
+  const url = `${baseUrl}${urlPath}`;
+
+  const page = await ctx.newPage();
+  try {
+    // Load a neutral page first so we're on the same origin (needed for credentials: "include")
+    await page.goto(`${baseUrl}/timetable/`, { waitUntil: "networkidle", timeout: 25_000 });
+    const cookies = await ctx.cookies(baseUrl);
+    const csrf = cookies.find((c) => c.name === "uu.app.csrf")?.value ?? "";
+
+    const body = await page.evaluate(
+      async ({ reqUrl, csrfToken }) => {
+        const r = await fetch(reqUrl, {
+          method: "GET",
+          headers: {
+            "X-Requested-With": "XMLHttpRequest",
+            "X-CSRF-Token": csrfToken,
+            "Accept": "*/*",
+          },
+          credentials: "include",
+        });
+        return r.text();
+      },
+      { reqUrl: url, csrfToken: csrf }
+    );
+    return body;
+  } finally {
+    try { await page.close(); } catch { /* ignore */ }
+  }
+}
+
 export async function portalFetch(
   cfg: ClientConfig,
   urlPath: string,
@@ -266,14 +315,18 @@ export async function portalFetch(
         }
 
         // GET: standard page navigation
-        const response = await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 20_000 });
+        await page.goto(targetUrl, { waitUntil: "networkidle", timeout: 25_000 });
+        // Wait for any OIDC redirects to fully settle before reading finalUrl
+        await page.waitForFunction(
+          (lp: string) => !window.location.href.includes(lp),
+          "/user/login",
+          { timeout: 8_000 }
+        ).catch(() => { /* best-effort — caller checks finalUrl */ });
         const finalUrl = page.url();
         const bodyText = await page.content();
-        const status = response?.status() ?? 200;
+        const response = null; // networkidle path doesn't expose response easily
+        const status = finalUrl.includes("/user/login") ? 302 : 200;
         const resHeaders: Record<string, string> = {};
-        for (const [k, v] of Object.entries(response?.headers() ?? {})) {
-          resHeaders[k.toLowerCase()] = v;
-        }
         return { status, headers: resHeaders, body: bodyText, finalUrl };
       } finally {
         try { await page.close(); } catch { /* ignore */ }
