@@ -333,12 +333,13 @@ export async function getTimetable(args: { view?: "current" | "static" | "upcomi
     await portalAjax(cfg(), `/timetable/?mainMenu-termSelector-new=${termId}&do=mainMenu-termSelector-change`);
   }
 
-  let path = basePath;
+  // Week navigation is a Nette AJAX signal (requires X-Requested-With + CSRF),
+  // same as term switching — use portalAjax, then fetch the plain timetable page.
   if (args.offset && args.view !== "static") {
-    path += `?familyTimetable-value=${args.offset}&do=familyTimetable-changeFilter`;
+    await portalAjax(cfg(), `/timetable/?familyTimetable-value=${args.offset}&do=familyTimetable-changeFilter`);
   }
 
-  const html = await getPage(path);
+  const html = await getPage(basePath);
   const $ = parseHtml(html);
 
   const heading = $("h2, h1").first().text().trim();
@@ -389,7 +390,7 @@ export async function getTimetable(args: { view?: "current" | "static" | "upcomi
     }
   });
 
-  return { heading, term: termLabel, path, events: events.slice(0, 100) };
+  return { heading, term: termLabel, path: basePath, events: events.slice(0, 100) };
 }
 
 export async function getAttendance(args: { view?: "excuse" | "report" | "report-lesson" | "excused" | "stats" | "overview" }) {
