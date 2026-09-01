@@ -56,17 +56,13 @@ async function getContext(cfg: ClientConfig): Promise<BrowserContext> {
     const testPage = await ctx.newPage();
     let sessionValid = false;
     try {
-      await testPage.goto(`${baseUrl}/overview/updates`, {
+      // Navigate to login page — valid session redirects away, expired session stays
+      await testPage.goto(`${baseUrl}/user/login`, {
         waitUntil: "domcontentloaded",
-        timeout: 15_000,
-      });
-      // Wait generously for OIDC redirects to settle (up to 8s)
-      await testPage.waitForFunction(
-        (lp: string) => !window.location.href.includes(lp),
-        "/user/login",
-        { timeout: 8_000 }
-      ).catch(() => {});
+        timeout: 10_000,
+      }).catch(() => {});
       const finalUrl = testPage.url();
+      // If redirected away from /user/login — session is valid
       sessionValid = !finalUrl.includes("/user/login");
     } catch {
       // ignore, treat as expired
