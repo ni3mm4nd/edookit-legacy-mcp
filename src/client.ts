@@ -26,6 +26,114 @@ function profileDir(school: string): string {
   return dir;
 }
 
+// ── Plus4U OIDC session storage helpers ──────────────────────────────────────
+// After a successful Playwright form-login the Plus4U OIDC SDK keeps the
+// session (id_token + refresh_token) in the page's sessionStorage.  We persist
+// it to disk so that the next startup can inject it back via addInitScript()
+// before the OIDC SDK runs — letting Plus4U do a silent prompt=none re-auth
+// instead of showing the credential form again.
+
+const SESSION_STORAGE_FILE = "session-storage.json";
+
+function sessionStoragePath(school: string): string {
+  return path.join(profileDir(school), SESSION_STORAGE_FILE);
+}
+
+function loadSessionStorage(school: string): Record<string, string> | null {
+  const p = sessionStoragePath(school);
+  try {
+    if (!fs.existsSync(p)) return null;
+    const raw = fs.readFileSync(p, "utf8");
+    const obj = JSON.parse(raw);
+    if (typeof obj !== "object" || obj === null || Array.isArray(obj)) return null;
+    return obj as Record<string, string>;
+  } catch {
+    return null;
+  }
+}
+
+async function saveSessionStorage(page: import("playwright").Page, school: string): Promise<void> {
+  try {
+    const storage = await page.evaluate((): Record<string, string> => {
+      const items: Record<string, string> = {};
+      for (let i = 0; i < sessionStorage.length; i++) {
+        const key = sessionStorage.key(i);
+        if (key) items[key] = sessionStorage.getItem(key) ?? "";
+      }
+      return items;
+    });
+    if (Object.keys(storage).length > 0) {
+      fs.writeFileSync(sessionStoragePath(school), JSON.stringify(storage, null, 2), { mode: 0o600 });
+      process.stderr.write("[edookit-portal] Saved Plus4U OIDC session storage for fast re-auth.\n");
+    }
+  } catch {
+    // Non-critical — ignore
+  }
+}
+
+function clearSessionStorage(school: string): void {
+  try { fs.rmSync(sessionStoragePath(school), { force: true }); } catch { /* ignore */ }
+}
+
+/**
+ * Attempt a fast (no-form) login by injecting saved Plus4U OIDC session
+ * storage into the page before it loads, then letting the SDK do a silent
+ * prompt=none callback.  Returns true if edookit auth cookies appeared.
+ */
+async function tryFastLogin(
+  ctx: BrowserContext,
+  cfg: ClientConfig,
+  savedStorage: Record<string, string>,
+): Promise<boolean> {
+  const baseUrl = `https://${cfg.school}.edookit.net`;
+  const page = await ctx.newPage();
+  try {
+    // Inject saved sessionStorage before any page JS runs (addInitScript fires
+    // in the page context before the first script tag executes).
+    await page.addInitScript((storage: Record<string, string>) => {
+      try {
+        Object.entries(storage).forEach(([k, v]) => sessionStorage.setItem(k, v));
+      } catch { /* sandboxed context */ }
+    }, savedStorage);
+
+    // Do NOT strip prompt=none this time — we WANT the silent re-auth to work.
+    await page.goto(`${baseUrl}/user/login`, {
+      waitUntil: "domcontentloaded",
+      timeout: 25_000,
+    }).catch(() => {});
+
+    // Wait up to 20 s for auth cookies (prompt=none is fast when it works)
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline) {
+      const cookies = await ctx.cookies(baseUrl);
+      if (cookies.some((c) => c.name === "X-EdooAuthToken" || c.name === "X-Auth-Id")) {
+        // Confirm session by navigating to a real page
+        try {
+          await page.goto(`${baseUrl}/overview/updates`, {
+            waitUntil: "domcontentloaded",
+            timeout: 15_000,
+          });
+          await page.waitForFunction(
+            (lp: string) => !window.location.href.includes(lp),
+            "/user/login",
+            { timeout: 6_000 }
+          ).catch(() => {});
+        } catch { /* best-effort */ }
+        process.stderr.write("[edookit-portal] Fast re-auth succeeded (Plus4U prompt=none).\n");
+        // Refresh the saved session storage after a successful fast re-auth
+        await saveSessionStorage(page, cfg.school);
+        return true;
+      }
+      await page.waitForTimeout(300);
+    }
+    return false;
+  } catch {
+    return false;
+  } finally {
+    try { await page.close(); } catch { /* ignore */ }
+  }
+}
+
 async function getContext(cfg: ClientConfig): Promise<BrowserContext> {
   if (_ctx && _ctxSchool === cfg.school) return _ctx;
 
@@ -77,8 +185,25 @@ async function getContext(cfg: ClientConfig): Promise<BrowserContext> {
       return ctx;
     }
 
-    process.stderr.write("[edookit-portal] Existing session expired, re-logging in...\n");
-    // Clear cookies and wipe profile for fresh login
+    process.stderr.write("[edookit-portal] Existing session expired, attempting Plus4U fast re-auth...\n");
+
+    // Try headless re-auth by injecting saved Plus4U OIDC session storage.
+    // This avoids spawning a new context or wiping the profile — just clears
+    // the stale edookit cookies and lets the OIDC SDK renew them.
+    const savedStorage = loadSessionStorage(cfg.school);
+    if (savedStorage && cfg.username && cfg.password) {
+      await ctx.clearCookies();
+      const fastOk = await tryFastLogin(ctx, cfg, savedStorage);
+      if (fastOk) {
+        _ctx = ctx;
+        _ctxSchool = cfg.school;
+        return ctx;
+      }
+      process.stderr.write("[edookit-portal] Fast re-auth failed, falling back to form login...\n");
+      clearSessionStorage(cfg.school);
+    }
+
+    // Fast path failed (or no saved storage) — wipe profile and do a full form login
     await ctx.clearCookies();
     await ctx.close();
     fs.rmSync(dir, { recursive: true, force: true });
@@ -194,6 +319,7 @@ async function loginWithContext(ctx: BrowserContext, cfg: ClientConfig): Promise
           // best-effort
         }
         process.stderr.write("[edookit-portal] Authentication successful.\n");
+        await saveSessionStorage(page, cfg.school);
         await page.close();
         return;
       }
@@ -378,4 +504,5 @@ export function invalidateSession(school: string) {
   }
   const dir = path.join(os.homedir(), ".cache", "edookit-legacy-mcp", `profile-${school}`);
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  clearSessionStorage(school);
 }
