@@ -13,7 +13,8 @@ MCP server for the Edookit **parent/student portal** (`*.edookit.net`). Scrapes 
 | `portal_exams` | Written tests and oral exams — upcoming or archive |
 | `portal_materials` | Teaching/learning materials; optional course filter |
 | `portal_lesson_plans` | Lesson plan / curriculum content per week |
-| `portal_timetable` | Student timetable — current week, static, upcoming events, archive |
+| `portal_timetable` | Student timetable — current week, static, upcoming events, archive. Use `offset` (multiples of 7) to navigate weeks: `7` = next week, `-7` = last week, `14` = two weeks ahead, etc. Use `term` to select a school year (e.g. `2026/27`). |
+| `portal_terms` | List available school terms/years |
 | `portal_attendance` | Attendance records and stats (retroactive excuse, forward report, stats, overview) |
 | `portal_excuse_absence` | Submit a retroactive absence excuse for specific dates |
 | `portal_report_absence` | Report a future absence by day or by lesson |
@@ -30,39 +31,50 @@ MCP server for the Edookit **parent/student portal** (`*.edookit.net`). Scrapes 
 
 ## Setup
 
-### 1. Build from source
-
-```bash
-git clone <this-repo>
-cd edookit-legacy-mcp
-npm install
-npx playwright install chromium
-npm run build
-```
-
-### 2. Add to Claude Desktop / Claude Code
+### 1. Install via npx (no build needed)
 
 ```json
 {
   "mcpServers": {
     "edookit-portal": {
-      "command": "node",
-      "args": ["/path/to/edookit-legacy-mcp/dist/index.js"],
+      "command": "npx",
+      "args": ["github:thewulf7/edookit-legacy-mcp"],
       "env": {
-        "EDOOKIT_SCHOOL": "skolasquare"
+        "EDOOKIT_SCHOOL": "your-school",
+        "EDOOKIT_USERNAME": "your@email.com",
+        "EDOOKIT_PASSWORD": "yourpassword"
       }
     }
   }
 }
 ```
 
-`EDOOKIT_SCHOOL` is the subdomain — if your portal is at `https://zs-example.edookit.net`, use `zs-example`.
+### 2. Build from source (optional)
 
-### 3. First-time login
+```bash
+git clone https://github.com/thewulf7/edookit-legacy-mcp
+cd edookit-legacy-mcp
+npm install
+npx playwright install chromium
+npm run build
+node dist/index.js
+```
 
-On the first tool call, the MCP server will open a **visible Chrome window** and navigate to the school portal login page. Complete the Plus4U / Google login in that window. Once authenticated, the window closes automatically and the session is cached for **10 hours** in `~/.cache/edookit-legacy-mcp/`. Subsequent calls use the cached session silently.
+### 3. Environment variables
 
-To force a fresh login, delete `~/.cache/edookit-legacy-mcp/<school>.session.json`.
+| Variable | Required | Description |
+|---|---|---|
+| `EDOOKIT_SCHOOL` | yes | Subdomain — if your portal is `https://zs-example.edookit.net`, use `zs-example` |
+| `EDOOKIT_USERNAME` | no | Plus4U login (email). If omitted, a visible browser window opens for interactive login. |
+| `EDOOKIT_PASSWORD` | no | Plus4U password. Required together with `EDOOKIT_USERNAME` for headless mode. |
+
+### 4. Authentication
+
+**Headless (recommended):** provide `EDOOKIT_USERNAME` + `EDOOKIT_PASSWORD`. The server logs in via Playwright, saves the Plus4U OIDC session to `~/.cache/edookit-legacy-mcp/profile-<school>/session-storage.json`, and uses a fast silent re-auth on subsequent starts — no browser window, no manual steps.
+
+**Interactive:** omit credentials. On the first tool call a visible Chrome window opens at the portal login page. Complete the Plus4U / Google login manually. Once authenticated the window closes and the session is cached. This only works on a machine with a display.
+
+To force a full re-login, delete `~/.cache/edookit-legacy-mcp/profile-<school>/`.
 
 ## Notes
 
@@ -70,3 +82,4 @@ To force a fresh login, delete `~/.cache/edookit-legacy-mcp/<school>.session.jso
 - All text is in Czech (the portal language); field values are returned as-is.
 - Pages with no data return empty arrays — this is normal for accounts with no activity yet.
 - `portal_search` depends on whether the school has search enabled in their Edookit instance.
+- `portal_timetable` with `offset` fires a server-side session filter via AJAX before fetching the page, so the offset persists for the duration of the MCP process session.
