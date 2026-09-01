@@ -4,12 +4,12 @@ import { portalFetch, portalAjax, parseHtml, type ClientConfig } from "./client.
 
 function cfg(): ClientConfig {
   const school = process.env.EDOOKIT_SCHOOL;
+  const username = process.env.EDOOKIT_USERNAME;
+  const password = process.env.EDOOKIT_PASSWORD;
   if (!school) throw new Error("Missing env var: EDOOKIT_SCHOOL");
-  return {
-    school,
-    username: process.env.EDOOKIT_USERNAME,
-    password: process.env.EDOOKIT_PASSWORD,
-  };
+  if (!username) throw new Error("Missing env var: EDOOKIT_USERNAME");
+  if (!password) throw new Error("Missing env var: EDOOKIT_PASSWORD");
+  return { school, username, password };
 }
 
 async function getPage(path: string) {

@@ -7,8 +7,8 @@ import { chromium } from "playwright";
 
 export interface ClientConfig {
   school: string;
-  username?: string;
-  password?: string;
+  username: string;
+  password: string;
 }
 
 // ── Persistent browser context (one per process, kept alive) ─────────────────
@@ -144,11 +144,10 @@ async function getContext(cfg: ClientConfig): Promise<BrowserContext> {
   }
 
   const dir = profileDir(cfg.school);
-  const headless = !!(cfg.username && cfg.password);
 
   process.stderr.write("[edookit-portal] Launching persistent browser context...\n");
   const ctx = await chromium.launchPersistentContext(dir, {
-    headless,
+    headless: true,
     args: ["--no-sandbox"],
   });
 
@@ -209,7 +208,7 @@ async function getContext(cfg: ClientConfig): Promise<BrowserContext> {
     fs.rmSync(dir, { recursive: true, force: true });
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     // Create a fresh context and log in directly (no verification check on brand-new session)
-    const freshCtx = await chromium.launchPersistentContext(dir, { headless, args: ["--no-sandbox"] });
+    const freshCtx = await chromium.launchPersistentContext(dir, { headless: true, args: ["--no-sandbox"] });
     await loginWithContext(freshCtx, cfg);
     _ctx = freshCtx;
     _ctxSchool = cfg.school;
@@ -226,16 +225,8 @@ async function getContext(cfg: ClientConfig): Promise<BrowserContext> {
 
 async function loginWithContext(ctx: BrowserContext, cfg: ClientConfig): Promise<void> {
   const baseUrl = `https://${cfg.school}.edookit.net`;
-  const headless = !!(cfg.username && cfg.password);
 
-  if (headless) {
-    process.stderr.write("[edookit-portal] Logging in with username/password...\n");
-  } else {
-    process.stderr.write(
-      "[edookit-portal] No credentials provided. Opening browser for interactive login.\n" +
-      "[edookit-portal] Please log in in the browser window that opens.\n"
-    );
-  }
+  process.stderr.write("[edookit-portal] Logging in with username/password...\n");
 
   const page = await ctx.newPage();
 
@@ -252,54 +243,52 @@ async function loginWithContext(ctx: BrowserContext, cfg: ClientConfig): Promise
   try {
     await page.goto(`${baseUrl}/user/login`);
 
-    if (cfg.username && cfg.password) {
-      // Wait for either the login form OR auth cookies (silent SSO may skip the form)
-      await Promise.race([
-        page.waitForSelector('input[name="username"]', { timeout: 20_000 }),
-        (async () => {
-          const deadline = Date.now() + 20_000;
-          while (Date.now() < deadline) {
-            const cookies = await ctx.cookies(baseUrl);
-            if (cookies.some((c) => c.name === "X-EdooAuthToken" || c.name === "X-Auth-Id")) return;
-            await page.waitForTimeout(200);
-          }
-        })(),
-      ]);
+    // Wait for either the login form OR auth cookies (silent SSO may skip the form)
+    await Promise.race([
+      page.waitForSelector('input[name="username"]', { timeout: 20_000 }),
+      (async () => {
+        const deadline = Date.now() + 20_000;
+        while (Date.now() < deadline) {
+          const cookies = await ctx.cookies(baseUrl);
+          if (cookies.some((c) => c.name === "X-EdooAuthToken" || c.name === "X-Auth-Id")) return;
+          await page.waitForTimeout(200);
+        }
+      })(),
+    ]);
 
-      // Check if already authenticated via silent SSO
-      const earlyCheck = await ctx.cookies(baseUrl);
-      if (!earlyCheck.some((c) => c.name === "X-EdooAuthToken" || c.name === "X-Auth-Id")) {
-        // Form is visible — fill credentials
-        await page.fill('input[name="username"]', cfg.username);
-        await page.locator("button.uuelements-1gc3md2").first().click({ force: true });
-        await page.waitForSelector('input[name="password"]', { timeout: 15_000 });
-        await page.fill('input[name="password"]', cfg.password);
-        await page.evaluate(() => {
-          const s = document.querySelector<HTMLInputElement>('input[type="submit"]');
-          if (s) s.click();
-        });
-        process.stderr.write("[edookit-portal] Credentials submitted, waiting for session...\n");
-      } else {
-        process.stderr.write("[edookit-portal] Silent SSO detected — forcing credential form...\n");
-        // Silent SSO happened but we need a fresh credential-bound session.
-        // Navigate to logout to kill the SSO session, then retry login.
-        try { await page.goto(`${baseUrl}/user/logout`, { timeout: 10_000 }); } catch { /* ignore */ }
-        await page.goto(`${baseUrl}/user/login`);
-        await page.waitForSelector('input[name="username"]', { timeout: 20_000 });
-        await page.fill('input[name="username"]', cfg.username);
-        await page.locator("button.uuelements-1gc3md2").first().click({ force: true });
-        await page.waitForSelector('input[name="password"]', { timeout: 15_000 });
-        await page.fill('input[name="password"]', cfg.password);
-        await page.evaluate(() => {
-          const s = document.querySelector<HTMLInputElement>('input[type="submit"]');
-          if (s) s.click();
-        });
-        process.stderr.write("[edookit-portal] Credentials submitted after SSO bypass, waiting...\n");
-      }
+    // Check if already authenticated via silent SSO
+    const earlyCheck = await ctx.cookies(baseUrl);
+    if (!earlyCheck.some((c) => c.name === "X-EdooAuthToken" || c.name === "X-Auth-Id")) {
+      // Form is visible — fill credentials
+      await page.fill('input[name="username"]', cfg.username);
+      await page.locator("button.uuelements-1gc3md2").first().click({ force: true });
+      await page.waitForSelector('input[name="password"]', { timeout: 15_000 });
+      await page.fill('input[name="password"]', cfg.password);
+      await page.evaluate(() => {
+        const s = document.querySelector<HTMLInputElement>('input[type="submit"]');
+        if (s) s.click();
+      });
+      process.stderr.write("[edookit-portal] Credentials submitted, waiting for session...\n");
+    } else {
+      process.stderr.write("[edookit-portal] Silent SSO detected — forcing credential form...\n");
+      // Silent SSO happened but we need a fresh credential-bound session.
+      // Navigate to logout to kill the SSO session, then retry login.
+      try { await page.goto(`${baseUrl}/user/logout`, { timeout: 10_000 }); } catch { /* ignore */ }
+      await page.goto(`${baseUrl}/user/login`);
+      await page.waitForSelector('input[name="username"]', { timeout: 20_000 });
+      await page.fill('input[name="username"]', cfg.username);
+      await page.locator("button.uuelements-1gc3md2").first().click({ force: true });
+      await page.waitForSelector('input[name="password"]', { timeout: 15_000 });
+      await page.fill('input[name="password"]', cfg.password);
+      await page.evaluate(() => {
+        const s = document.querySelector<HTMLInputElement>('input[type="submit"]');
+        if (s) s.click();
+      });
+      process.stderr.write("[edookit-portal] Credentials submitted after SSO bypass, waiting...\n");
     }
 
     // Wait for auth cookies
-    const timeout = headless ? 30_000 : 5 * 60_000;
+    const timeout = 30_000;
     const deadline = Date.now() + timeout;
 
     while (Date.now() < deadline) {
@@ -326,11 +315,7 @@ async function loginWithContext(ctx: BrowserContext, cfg: ClientConfig): Promise
       await page.waitForTimeout(300);
     }
 
-    throw new Error(
-      headless
-        ? "Login timed out. Check EDOOKIT_USERNAME and EDOOKIT_PASSWORD."
-        : "Interactive login timed out after 5 minutes."
-    );
+    throw new Error("Login timed out. Check EDOOKIT_USERNAME and EDOOKIT_PASSWORD.");
   } catch (err) {
     try { await page.close(); } catch { /* ignore */ }
     throw err;
